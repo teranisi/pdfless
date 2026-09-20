@@ -41,6 +41,25 @@ def test_dash_argument_also_means_stdin(pty_session):
     assert_no_crash(session, [b"q"], initial_wait=0)
 
 
+def test_stdin_pager_passes_through_ansi_color_sequences(pty_session):
+    """When used as $PAGER (e.g. for `git diff`), colored output must
+    not treat SGR escapes as visible text - otherwise headers show up
+    as literal ^[[1mdiff --git..."""
+    import pdfless
+
+    line = "\x1b[1mdiff --git a/README.md b/README.md\x1b[m\n"
+    assert pdfless.display_width(line.rstrip("\n")) == len("diff --git a/README.md b/README.md")
+
+    content = (line + "plain line\n").encode()
+    session = pty_session([], rows=20, cols=80, stdin_data=content)
+    time.sleep(3)
+    out = session.read_all(1.0).decode(errors="replace")
+    assert "diff --git a/README.md b/README.md" in out
+    assert "plain line" in out
+    assert "^[[1m" not in out  # ESC must not become caret notation
+    assert_no_crash(session, [b"q"], initial_wait=0)
+
+
 def test_stdin_pager_scrolls_and_quits_cleanly(pty_session):
     """Not just a static dump - the usual line/page navigation and a
     clean "q" exit work the same as paging a real file."""

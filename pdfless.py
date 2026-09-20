@@ -170,20 +170,52 @@ def char_width(ch):
     return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
 
 
+# ECMA-48 control sequences git/man/etc. emit when pdfless is used as
+# $PAGER with color enabled - must not count toward terminal width.
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\[[\?0-9;]*[ -/]*[@-~]"  # CSI (incl. SGR "...m")
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC
+    r"|\x1b[P^_][^\x1b]*(?:\x07|\x1b\\)?"  # DCS / SOS / PM
+    r"|\x1b[@-Z\\-_]"  # Fe Escape sequences
+)
+
+
+def _ansi_escape_at(s, i):
+    if i >= len(s) or s[i] != "\x1b":
+        return None
+    return _ANSI_ESCAPE_RE.match(s, i)
+
+
 def display_width(s):
-    return sum(char_width(c) for c in s)
+    i = 0
+    width = 0
+    while i < len(s):
+        m = _ansi_escape_at(s, i)
+        if m:
+            i = m.end()
+            continue
+        width += char_width(s[i])
+        i += 1
+    return width
 
 
 def truncate_to_width(s, width):
     """Truncate `s` so its terminal column width doesn't exceed `width`."""
     out = []
     total = 0
-    for ch in s:
-        w = char_width(ch)
+    i = 0
+    while i < len(s):
+        m = _ansi_escape_at(s, i)
+        if m:
+            out.append(m.group(0))
+            i = m.end()
+            continue
+        w = char_width(s[i])
         if total + w > width:
             break
-        out.append(ch)
+        out.append(s[i])
         total += w
+        i += 1
     return "".join(out)
 
 
@@ -206,21 +238,29 @@ def slice_by_width(s, offset, width):
     col = 0
     taken = 0
     start_index = None
-    for i, ch in enumerate(s):
-        w = char_width(ch)
+    i = 0
+    while i < len(s):
+        m = _ansi_escape_at(s, i)
+        if m:
+            if col >= offset and taken < width:
+                if start_index is None:
+                    start_index = i
+                out.append(m.group(0))
+            i = m.end()
+            continue
+        w = char_width(s[i])
         if col < offset:
-            # Starts before the pan offset - skip it, whether or not it
-            # also straddles into [offset, ...): either way it can't be
-            # shown intact starting exactly at `offset`.
             col += w
+            i += 1
             continue
         if start_index is None:
             start_index = i
         if taken + w > width:
             break
-        out.append(ch)
+        out.append(s[i])
         taken += w
         col += w
+        i += 1
     if start_index is None:
         start_index = len(s)
     return "".join(out), start_index
@@ -1683,6 +1723,27 @@ def _caret_notation(match):
     return "^" + chr(ord(match.group()) ^ 0x40)
 
 
+def _sanitize_text_for_display(content):
+    """Show stray control characters in caret notation, but pass ANSI
+    color/style sequences through intact - git/man/etc. emit those when
+    pdfless is used as $PAGER."""
+    out = []
+    i = 0
+    while i < len(content):
+        m = _ansi_escape_at(content, i)
+        if m:
+            out.append(m.group(0))
+            i = m.end()
+            continue
+        ch = content[i]
+        if _CONTROL_CHAR_RE.fullmatch(ch):
+            out.append(_caret_notation(_CONTROL_CHAR_RE.match(ch)))
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def read_plain_text_lines(path, tab_width=8):
     """A plain text file's lines, as pdftotext -layout's output is for a
     PDF page: ready to hand straight to the existing text-mode renderer.
@@ -1700,7 +1761,7 @@ def read_plain_text_lines(path, tab_width=8):
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
     content = content.expandtabs(tab_width)
-    content = _CONTROL_CHAR_RE.sub(_caret_notation, content)
+    content = _sanitize_text_for_display(content)
     return content.splitlines()
 
 
