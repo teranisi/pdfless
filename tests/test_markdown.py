@@ -61,10 +61,10 @@ def test_markdown_text_mode_shows_raw_source(sample_md, tmp_path):
 
 
 @requires_markdown_rendering
-def test_markdown_text_mode_toggle_clears_active_search(sample_md, tmp_path):
+def test_markdown_text_mode_toggle_reindexes_active_search(sample_md, tmp_path):
     """Markdown image mode searches the rendered PDF; text mode searches
-    the raw source - different text, so `t` clears any active search
-    rather than trying to carry a match across."""
+    the raw source - different extractions, so `t` re-runs the same query
+    in the new mode instead of carrying the match object across."""
     from test_search import make_viewer
 
     handler = classify(sample_md, tmp_path)
@@ -72,18 +72,33 @@ def test_markdown_text_mode_toggle_clears_active_search(sample_md, tmp_path):
     viewer = make_viewer(handler)
     viewer.start_search("追加セクション2")
     assert viewer.search_query == "追加セクション2"
+    assert viewer.search_matches
+    assert len(viewer.search_matches[0]) == 5  # PDF bbox tuple
 
     assert viewer.enter_text_mode() is True
     assert viewer.text_mode is True
-    assert viewer.search_query is None
+    assert viewer.search_query == "追加セクション2"
+    assert viewer.search_matches
+    assert len(viewer.search_matches[0]) == 3  # (line_idx, start, end)
     viewer._draw_text_unwrapped()  # must not raise
-
-    viewer.start_search("## リスト")
-    assert viewer.search_query == "## リスト"
 
     assert viewer.toggle_text_mode() is True
     assert viewer.text_mode is False
-    assert viewer.search_query is None
+    assert viewer.search_query == "追加セクション2"
+    assert viewer.search_matches
+    assert len(viewer.search_matches[0]) == 5  # PDF bbox again
+    viewer.refresh()  # must not raise
+
+    # A query that only exists in the raw source: reindex keeps the
+    # query but finds no PDF bbox matches.
+    assert viewer.enter_text_mode() is True
+    viewer.start_search("## リスト")
+    assert viewer.search_matches
+    assert viewer.toggle_text_mode() is True
+    assert viewer.search_query == "## リスト"
+    assert viewer.search_matches == []
+    assert viewer.search_pos is None
+    viewer.refresh()  # must not raise
 
 
 @requires_markdown_rendering
