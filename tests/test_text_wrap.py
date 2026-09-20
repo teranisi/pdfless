@@ -198,12 +198,11 @@ def test_search_match_scrolls_to_correct_display_row_when_wrapped(tmp_path):
     assert viewer.search_matches == [(match_line_idx, 0, 6)]
 
     expected_row = viewer._row_for_line(match_line_idx)
-    margin = viewer._text_avail_rows() // 4
     expected_scroll = max(
-        viewer.text_scroll_min, min(viewer.text_scroll_max, expected_row - margin)
+        viewer.text_scroll_min, min(viewer.text_scroll_max, expected_row)
     )
     wrong_scroll_using_raw_line_idx = max(
-        viewer.text_scroll_min, min(viewer.text_scroll_max, match_line_idx - margin)
+        viewer.text_scroll_min, min(viewer.text_scroll_max, match_line_idx)
     )
     assert expected_scroll != wrong_scroll_using_raw_line_idx  # a real regression
     # would actually go undetected below

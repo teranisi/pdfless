@@ -248,7 +248,9 @@ Keys:
   g G                     jump to top / bottom of the current page
                           (text mode: type a number first to jump to
                           that line instead, e.g. 10g -> line 10)
-  n p                     next / previous page (match while searching)
+  n p                     next / previous page (while searching: n/p
+                          repeat the search - n in the same direction
+                          as / or ?, p always backward)
   < > HOME END            jump to the first / last page of the document
                           (type a number first to jump to that page
                           instead, e.g. 10< -> page 10)
@@ -260,7 +262,8 @@ Keys:
   ?<regex> ENTER          the same search, landing on the last match
                           before here instead
   / ENTER  ? ENTER        repeat the last search pattern, forward / back
-  N P                     jump to next / previous search match
+  N P                     repeat search in the opposite direction (N)
+                          or backward through matches (P)
                             <CHANGING FILES>
   :n :p                   next / previous file, when more than one was
                           given on the command line
@@ -3781,6 +3784,7 @@ class Viewer:
         self._history_back = []  # [(page, scroll, x_offset), ...]
         self._history_forward = []
         self.search_query = None
+        self.search_backward = False  # last search opened with "?" not "/"
         self.search_matches = []
         self.search_pos = None
         # A plain text file has no image view at all - it's permanently
@@ -4567,11 +4571,10 @@ class Viewer:
         return min(all_matches, key=lambda c: abs(c[0] - approx_line))
 
     def _scroll_image_to_match(self, match):
-        """Scroll/pan the image view so `match` is visible, landing it a
-        little below the top-left rather than jammed against the edge."""
+        """Scroll/pan the image view so `match` lands at the top of the
+        screen, less(1)-style."""
         px_left, px_top, px_right, px_bottom = self._match_bbox_px(match)
-        margin = self.avail_height_px // 4
-        self.scroll = max(0, min(self.scroll_max, round(px_top) - margin))
+        self.scroll = max(0, min(self.scroll_max, round(px_top)))
         max_x_offset = max(0, self.img.width - self.crop_width)
         if px_left < self.x_offset or px_right > self.x_offset + self.crop_width:
             self.x_offset = max(
@@ -4580,44 +4583,33 @@ class Viewer:
             )
 
     def _scroll_text_to_match(self, match):
-        """Scroll/pan the text view so `match` is visible, landing it a
-        little below the top rather than jammed against the top edge -
-        panning horizontally into view too, in case the terminal is too
-        narrow for the line and it's off to the side of the truncated
-        view (the text-mode equivalent of _scroll_image_to_match()).
-        Wrapped text has no pan to speak of - _row_for_line() converts
-        the raw line position into a display-row scroll target instead."""
+        """Scroll/pan the text view so `match` lands on the top line,
+        less(1)-style - panning horizontally into view too when the
+        terminal is too narrow for the matched text."""
         avail_cols = max(1, self._text_avail_cols() - self._line_number_gutter_width())
         highlight = self._text_highlight_for_match(match)
         if highlight:
             line_idx, start, end = highlight
-            if self.text_wrap:
-                target_row = self._row_for_line(line_idx)
-            else:
-                line = self.text_lines[line_idx]
-                col_start = display_width(line[:start])
-                col_end = display_width(line[:end])
-                if col_start < self.text_x_offset or col_end > self.text_x_offset + avail_cols:
-                    self.text_x_offset = max(
-                        self.text_x_offset_min,
-                        min(
-                            self.text_x_offset_max,
-                            round((col_start + col_end) / 2 - avail_cols / 2),
-                        ),
-                    )
-                target_row = line_idx
         else:
             _, _xmin_pt, ymin_pt, _xmax_pt, _ymax_pt = match
             height_pt = self._search_index[self.page - 1]["height_pt"]
             line_idx = (
                 round((ymin_pt / height_pt) * len(self.text_lines)) if height_pt else 0
             )
-            target_row = self._row_for_line(line_idx) if self.text_wrap else line_idx
-        avail_rows = self._text_avail_rows()
-        margin = avail_rows // 4
-        self.text_scroll = max(
-            self.text_scroll_min, min(self.text_scroll_max, target_row - margin)
-        )
+            start = end = 0
+        if not self.text_wrap:
+            line = self.text_lines[line_idx]
+            col_start = display_width(line[:start])
+            col_end = display_width(line[:end])
+            if col_start < self.text_x_offset or col_end > self.text_x_offset + avail_cols:
+                self.text_x_offset = max(
+                    self.text_x_offset_min,
+                    min(
+                        self.text_x_offset_max,
+                        round((col_start + col_end) / 2 - avail_cols / 2),
+                    ),
+                )
+        self._scroll_to_text_line(line_idx)
 
     def go_to_page_text(self, page, scroll):
         self.page = max(1, min(self.npages, page))
@@ -5293,7 +5285,8 @@ class Viewer:
     def draw_search_prompt(self, buf, backward=False):
         """The search pattern being typed, echoed on the status line
         behind the prompt character it was opened with - "/" forward,
-        "?" backward, the same as less(1) shows them."""
+        "?" backward, the same as less(1) shows them. When opened, buf
+        is the previous pattern so Enter alone can repeat it."""
         # Unlike draw_status(), this doesn't pad the line out to the full
         # terminal width: padding leaves the cursor sitting at the far
         # right edge (in autowrap's "pending wrap" state), which is past
@@ -5565,6 +5558,7 @@ class Viewer:
 
     def clear_search(self):
         self.search_query = None
+        self.search_backward = False
         self.search_matches = []
         self.search_pos = None
 
@@ -5572,8 +5566,9 @@ class Viewer:
     def _match_index_from(positions, here, backward):
         """Which of the matches a search should land on, given where it
         started from. `positions` is every match's position in ascending
-        order, in whatever unit `here` is in (a page number, or a raw
-        text_lines index); the answer is an index into it.
+        order, in whatever unit `here` is in (a raw text_lines index,
+        or a (page, y) pair within a paginated PDF); the answer is an
+        index into it.
 
         Forward ("/"), that's the first match at or after `here`;
         backward ("?"), the last one strictly before it - so "?" can
@@ -5601,15 +5596,43 @@ class Viewer:
         where a real PDF delegate's bbox index should still be used."""
         return self.text_mode and not self.doc_handler.text_mode_is_paginated()
 
+    def _match_position(self, match):
+        """Sort key for one search match - a line index for flat text,
+        or (page, ymin) for a paginated PDF bbox match."""
+        if self._search_uses_text_lines():
+            return match[0]
+        return (match[0], match[2])
+
+    def _search_here(self):
+        """Where a new / or ? search starts from - less(1)'s first line
+        on screen for flat text, or the top of the current viewport on
+        the current page for paginated PDF/image views."""
+        if self._search_uses_text_lines():
+            return self._top_text_line()
+        page_info = self._search_index[self.page - 1]
+        height_pt = page_info.get("height_pt", 0)
+        if self.text_mode:
+            line_idx = self._top_text_line()
+            n = len(self.text_lines)
+            y = (line_idx / n) * height_pt if n and height_pt else 0
+        else:
+            if self.img is not None and height_pt:
+                scale_y = self.img.height / height_pt
+                y = self.scroll / scale_y
+            else:
+                y = 0
+        return (self.page, y)
+
     def start_search(self, query, backward=False):
         """Search the whole document for `query` and jump to one match -
         which one depends on where you are now and on `backward`, i.e.
         on whether the prompt was opened with "?" rather than "/" (see
-        _match_index_from()). N/P walk every match from there on,
-        regardless of the direction this started in."""
+        _match_index_from()). n/N then repeat in the same/opposite
+        direction, less(1)-style (see repeat_search_for_key())."""
         if not query:
             return
         self.search_query = query
+        self.search_backward = backward
         if self._search_uses_text_lines():
             # No page/bbox structure for a non-paginated document
             # (plain text/RTF, or Markdown currently in text mode) -
@@ -5624,7 +5647,9 @@ class Viewer:
             # too - text_scroll itself counts display rows while the
             # text is wrapped (see _top_text_line()).
             self._goto_search_match(self._match_index_from(
-                [m[0] for m in self.search_matches], self._top_text_line(), backward,
+                [self._match_position(m) for m in self.search_matches],
+                self._search_here(),
+                backward,
             ))
             return
 
@@ -5636,12 +5661,23 @@ class Viewer:
             self.search_pos = None
             self.draw_status(f'"{query}" not found')
             return
-        # A paginated document's matches are only ordered down to the
-        # page they're on, so that's the unit the starting point is
-        # measured in too.
         self._goto_search_match(self._match_index_from(
-            [m[0] for m in self.search_matches], self.page, backward,
+            [self._match_position(m) for m in self.search_matches],
+            self._search_here(),
+            backward,
         ))
+
+    def repeat_search_for_key(self, key):
+        """Map n/N/p/P to repeat_search()'s direction, less(1)-style:
+        n repeats in the same direction as the search that opened (/ or
+        ?); N repeats in the opposite direction. p/P always walk
+        backward through the match list (pdfless extension - less uses
+        p for the previous page)."""
+        if key in ("p", "P"):
+            return self.repeat_search(forward=False)
+        same_direction = key == "n"
+        forward = (not same_direction) if self.search_backward else same_direction
+        return self.repeat_search(forward=forward)
 
     def repeat_search(self, forward):
         if not self.search_matches:
@@ -5674,12 +5710,7 @@ class Viewer:
 
         if self._search_uses_text_lines():
             line_idx, start, end = self.search_matches[idx]
-            if self.text_wrap:
-                # No pan to speak of while wrapped - _row_for_line()
-                # converts the raw line position into a display-row
-                # scroll target instead (same as _scroll_text_to_match()).
-                target_row = self._row_for_line(line_idx)
-            else:
+            if not self.text_wrap:
                 avail_cols = max(1, self._text_avail_cols() - self._line_number_gutter_width())
                 line = self.text_lines[line_idx]
                 col_start = display_width(line[:start])
@@ -5692,12 +5723,7 @@ class Viewer:
                             round((col_start + col_end) / 2 - avail_cols / 2),
                         ),
                     )
-                target_row = line_idx
-            avail_rows = self._text_avail_rows()
-            margin = avail_rows // 4
-            self.text_scroll = max(
-                self.text_scroll_min, min(self.text_scroll_max, target_row - margin)
-            )
+            self._scroll_to_text_line(line_idx)
             self.refresh()
             self.draw_status(
                 f'"{self.search_query}" match {idx + 1}/{len(self.search_matches)}'
@@ -6300,7 +6326,11 @@ def run_viewer(
             # mode (doc_handler.supports_search() - currently PDF only,
             # via its own page/bbox index).
             if viewer.text_mode or viewer.doc_handler.supports_search():
-                search_buf = ""
+                # less(1) pre-fills the prompt with the last pattern so a
+                # bare Enter repeats it forward or backward.
+                if last_search_query is None and viewer.search_query:
+                    last_search_query = viewer.search_query
+                search_buf = last_search_query or ""
                 search_backward = key == "?"
                 viewer.draw_search_prompt(search_buf, backward=search_backward)
             else:
@@ -6308,11 +6338,8 @@ def run_viewer(
             continue
 
         if viewer.search_query is not None:
-            if key in ("n", "N"):
-                viewer.repeat_search(forward=True)
-                continue
-            if key in ("p", "P"):
-                viewer.repeat_search(forward=False)
+            if key in ("n", "N", "p", "P"):
+                viewer.repeat_search_for_key(key)
                 continue
 
         if key in ("q", "\x1b") and viewer.search_query is not None:

@@ -144,12 +144,36 @@ def test_match_index_from_picks_the_nearest_one_in_each_direction():
     assert pick(positions, 6, True) == 2
 
 
+def test_match_index_from_uses_viewport_position_within_a_page():
+    """Forward/backward search on a paginated PDF should start from
+    the top of the current viewport, not just the page number."""
+    positions = [(2, 100.0), (2, 500.0), (2, 900.0), (3, 50.0)]
+    pick = pdfless.Viewer._match_index_from
+
+    assert pick(positions, (2, 450.0), False) == 1
+    assert pick(positions, (2, 450.0), True) == 0
+    assert pick(positions, (2, 950.0), False) == 3
+
+
 def test_match_index_from_wraps_around_the_ends():
     positions = [2, 5, 9]
     pick = pdfless.Viewer._match_index_from
 
     assert pick(positions, 10, False) == 0  # past the last match -> the first
     assert pick(positions, 1, True) == 2  # before the first -> the last
+
+
+def test_forward_search_starts_from_the_top_visible_line(tmp_path):
+    path = tmp_path / "hits.txt"
+    path.write_text("".join(
+        ("hit\n" if i in (3, 17, 40) else f"line {i}\n") for i in range(60)
+    ))
+    viewer = make_viewer(pdfless.TextDocument(str(path)))
+    viewer.text_scroll = 10
+
+    viewer.start_search("hit")
+    assert viewer.search_matches[viewer.search_pos][0] == 17
+    assert viewer._top_text_line() == 17
 
 
 def test_backward_search_lands_on_the_match_above_you(tmp_path):
@@ -162,11 +186,32 @@ def test_backward_search_lands_on_the_match_above_you(tmp_path):
 
     viewer.start_search("hit", backward=True)
     assert viewer.search_matches[viewer.search_pos][0] == 17
+    assert viewer._top_text_line() == 17
     # ...where a forward search from the same spot goes the other way
     # (that first search scrolled us, so put us back first).
     viewer.text_scroll = 30
     viewer.start_search("hit")
     assert viewer.search_matches[viewer.search_pos][0] == 40
+
+
+def test_n_repeats_in_same_direction_as_search(sample_text):
+    """less(1)-style: after ? search, n walks backward; after /, forward."""
+    viewer = make_viewer(pdfless.TextDocument(sample_text))
+    viewer.start_search("line", backward=True)
+    assert viewer.search_pos == 2  # last match before the top
+
+    viewer.repeat_search_for_key("n")
+    assert viewer.search_pos == 1
+    viewer.repeat_search_for_key("n")
+    assert viewer.search_pos == 0
+
+    viewer.start_search("line", backward=False)
+    assert viewer.search_pos == 0
+    viewer.repeat_search_for_key("n")
+    assert viewer.search_pos == 1
+
+    viewer.repeat_search_for_key("N")
+    assert viewer.search_pos == 0
 
 
 def test_repeat_search_does_not_wrap_around(sample_text):

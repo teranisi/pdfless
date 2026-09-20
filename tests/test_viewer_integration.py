@@ -178,8 +178,8 @@ def test_colon_q_quits(pty_session, sample_text):
 
 
 def test_empty_search_pattern_repeats_the_last_one(pty_session, sample_text):
-    """An empty "/"/"?" (just Enter) should re-run the previous search
-    pattern, less(1)-style, rather than doing nothing."""
+    """A bare "/"/"?" Enter should re-run the previous search pattern,
+    less(1)-style - the prompt is pre-filled with it when opened."""
     session = pty_session([sample_text])
     time.sleep(3)
     session.read_all(0.5)
@@ -187,9 +187,24 @@ def test_empty_search_pattern_repeats_the_last_one(pty_session, sample_text):
     session.send(b"/line\r")
     session.read_all(0.5)
 
-    session.send(b"/\r")
+    session.send(b"/")
+    out = session.read_all(0.5).decode(errors="replace")
+    assert "/line" in out  # previous pattern pre-filled in the prompt
+
+    session.send(b"\r")
     out = session.read_all(0.5).decode(errors="replace")
     assert "no previous search pattern" not in out
+    assert '"line" not found' not in out
+    assert "Traceback" not in out
+
+    session.send(b"?")
+    out = session.read_all(0.5).decode(errors="replace")
+    assert "?line" in out
+
+    session.send(b"\r")
+    out = session.read_all(0.5).decode(errors="replace")
+    assert "no previous search pattern" not in out
+    assert '"line" not found' not in out
     assert "Traceback" not in out
 
     assert_no_crash(session, [b"q"], initial_wait=0)
