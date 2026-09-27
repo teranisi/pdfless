@@ -16,6 +16,7 @@ import termios
 import tempfile
 
 import pdfless
+from PIL import Image
 from conftest import requires_office_support, requires_soffice
 
 
@@ -28,7 +29,10 @@ def classify(path, tmp_path, debug=False):
 
 
 @requires_office_support
-def test_xlsx_multisheet_renders_one_page_per_sheet(sample_multisheet_xlsx, tmp_path):
+def test_xlsx_multisheet_renders_one_page_per_sheet(sample_multisheet_xlsx, tmp_path, monkeypatch):
+    """Without soffice: Quick Look's preview, one screenshot per sheet
+    (see ExcelWorkbook)."""
+    monkeypatch.setattr(pdfless, "find_soffice", lambda: None)
     handler = classify(sample_multisheet_xlsx, tmp_path)
     assert isinstance(handler, pdfless.OfficeDocument)
     pages = handler.build_pages(str(tmp_path))
@@ -36,31 +40,77 @@ def test_xlsx_multisheet_renders_one_page_per_sheet(sample_multisheet_xlsx, tmp_
 
 
 @requires_office_support
-def test_xls_legacy_multisheet_renders_one_page_per_sheet(sample_multisheet_xls, tmp_path):
+def test_xls_legacy_multisheet_renders_one_page_per_sheet(sample_multisheet_xls, tmp_path, monkeypatch):
     """The legacy binary format (soffice --headless --convert-to xls)
     must classify and paginate the same way as its .xlsx source -
     ShouldNotScale and the TabViewItem tab strip are both properties
     of qlmanage's own generated preview, not of the file format
     itself."""
+    monkeypatch.setattr(pdfless, "find_soffice", lambda: None)
     handler = classify(sample_multisheet_xls, tmp_path)
     assert isinstance(handler, pdfless.OfficeDocument)
     pages = handler.build_pages(str(tmp_path))
     assert len(pages) == 3
 
 
+@requires_soffice
+def test_excel_renders_via_soffice_one_whole_sheet_per_page(
+    sample_multisheet_xlsx, sample_multisheet_xls, tmp_path, monkeypatch,
+):
+    """With soffice, Excel is exported to a real PDF with Calc's
+    SinglePageSheets option (see _SOFFICE_SPREADSHEET_PDF_FILTER) - one
+    page per sheet, never paginated by print area - so it's searchable
+    and has per-sheet text, like Word."""
+    commands = []
+    real = pdfless.run_subprocess
+
+    def spy(cmd, *args, **kwargs):
+        commands.append(cmd)
+        return real(cmd, *args, **kwargs)
+    monkeypatch.setattr(pdfless, "run_subprocess", spy)
+    for i, path in enumerate((sample_multisheet_xlsx, sample_multisheet_xls)):
+        tmpdir = tmp_path / str(i)
+        tmpdir.mkdir()
+        handler = classify(path, tmpdir)
+        assert isinstance(handler, pdfless.OfficeDocument)
+        pages = handler.build_pages(str(tmpdir))
+        assert len(pages) == 3
+        assert handler._pdf_delegate is not None
+        assert handler.supports_search() is True
+        assert handler.text_mode_is_paginated() is True
+        assert "サンプルB" in "\n".join(handler.extract_text(3))
+    soffice_runs = [c for c in commands if "--convert-to" in c]
+    assert len(soffice_runs) == 2
+    assert all(c[c.index("--convert-to") + 1] == pdfless._SOFFICE_SPREADSHEET_PDF_FILTER for c in soffice_runs)
+    assert not any(c[0] == "qlmanage" for c in commands)  # classified without a Quick Look dry run
+
+
 @requires_office_support
-def test_numbers_multisheet_only_renders_first_sheet(sample_multisheet_numbers, tmp_path):
-    """Known gap (not a regression to fix here): Numbers' own Quick
-    Look generator (iWork.qlgenerator) marks up its multi-sheet tab
-    strip differently from Excel's (Office.qlgenerator) -
-    ExcelWorkbook._parse_sheet_tabs()'s TabViewItem-based regex
-    doesn't recognize it, so a multi-sheet .numbers workbook (unlike
-    the equivalent .xlsx/.xls) renders only its first sheet as a
-    single page rather than one page per sheet."""
+def test_numbers_multisheet_renders_one_page_per_sheet(sample_multisheet_numbers, tmp_path):
+    """Numbers' own Quick Look generator (iWork.qlgenerator) marks up
+    its multi-sheet tab strip differently from Excel's (see
+    ExcelWorkbook._NAVPANE_SHEET_RE), but it's still one page per
+    sheet, the same as the equivalent .xlsx/.xls."""
     handler = classify(sample_multisheet_numbers, tmp_path)
     assert isinstance(handler, pdfless.OfficeDocument)
     pages = handler.build_pages(str(tmp_path))
-    assert len(pages) == 1
+    assert len(pages) == 3
+
+
+@requires_office_support
+def test_numbers_sheets_have_no_broken_image(sample_multisheet_numbers, tmp_path):
+    """Each Numbers sheet embeds its content as <img src="AttachmentN.pdf">,
+    which Chrome can't display - it has to be converted first (see
+    _rasterize_broken_img_sources()), or all that's left is Chrome's
+    broken-image icon on an otherwise blank sheet. The sheet's own cell
+    grid is drawn in gray, so a converted sheet has plenty of non-white
+    pixels; a broken one has almost none."""
+    handler = classify(sample_multisheet_numbers, tmp_path)
+    pages = handler.build_pages(str(tmp_path))
+    for page in pages:
+        img = Image.open(page).convert("L")
+        dark = sum(img.histogram()[:200])  # pixels darker than 200/255
+        assert dark > img.width * img.height // 100
 
 
 @requires_office_support
@@ -84,25 +134,12 @@ def test_docx_twopage_paginates_via_print_to_pdf(sample_twopage_docx, tmp_path):
 
 
 @requires_office_support
-def test_docx_continuous_flag_forces_a_single_page(sample_twopage_docx, tmp_path):
-    """-c/--continuous still collapses it back to one page - the same
-    "no real page boundaries of its own" reasoning FlowingText already
-    had, just no longer the default (see
-    test_docx_twopage_paginates_via_print_to_pdf)."""
-    handler = classify(sample_twopage_docx, tmp_path)
-    assert isinstance(handler, pdfless.OfficeDocument)
-    pages = handler.build_pages(str(tmp_path), continuous=True)
-    assert len(pages) == 1
-
-
-@requires_office_support
 @requires_soffice
 def test_rtf_uses_soffice_when_available_and_paginates_really(sample_twopage_rtf, tmp_path):
     """Unlike the textutil-converted-docx fallback (see
     RtfOfficeDocument.build_pages()'s "Always continuous" branch),
     soffice reads the original .rtf natively, so its real \\page break
-    is trusted and produces 2 real pages even with -c/--continuous NOT
-    passed."""
+    is trusted and produces 2 real pages."""
     handler = classify(sample_twopage_rtf, tmp_path)
     assert isinstance(handler, pdfless.RtfOfficeDocument)
     pages = handler.build_pages(str(tmp_path))
@@ -150,11 +187,12 @@ def test_docx_becomes_searchable_via_its_pdf_delegate(sample_twopage_docx, tmp_p
 
 
 @requires_office_support
-def test_xlsx_has_no_pdf_delegate_so_search_is_unavailable(sample_multisheet_xlsx, tmp_path):
-    """Excel never renders via a real PDF (see ExcelWorkbook) - its
-    OfficeDocument._pdf_delegate stays None, so there's no per-page/
-    bbox index to search against, unlike Word (see
+def test_xlsx_has_no_pdf_delegate_so_search_is_unavailable(sample_multisheet_xlsx, tmp_path, monkeypatch):
+    """Without soffice, Excel never renders via a real PDF (see
+    ExcelWorkbook) - its OfficeDocument._pdf_delegate stays None, so
+    there's no per-page/bbox index to search against, unlike Word (see
     test_docx_becomes_searchable_via_its_pdf_delegate)."""
+    monkeypatch.setattr(pdfless, "find_soffice", lambda: None)
     handler = classify(sample_multisheet_xlsx, tmp_path)
     assert isinstance(handler, pdfless.OfficeDocument)
     handler.build_pages(str(tmp_path))
@@ -183,7 +221,7 @@ def test_docx_renders_via_a_pdf_delegate_for_crisp_zoom(sample_twopage_docx, tmp
     handler.build_pages(str(tmp_path))
     assert handler._pdf_delegate is not None
 
-    cache = pdfless.PageCache(handler.path, str(tmp_path), handler)
+    cache = pdfless.PageCache(str(tmp_path), handler)
     small = handler.get_page_image(cache, 1, 300, "width")
     big = handler.get_page_image(cache, 1, 1200, "width")
     assert small.width == 300
@@ -443,14 +481,12 @@ def test_odp_renders_via_soffice_one_page_per_slide(sample_twoslide_odp, tmp_pat
 
 @requires_soffice
 def test_ods_renders_via_soffice_one_page_per_sheet_for_a_simple_workbook(sample_multisheet_ods, tmp_path):
-    """A simple workbook (no print area/page-break configuration)
-    still comes out as one soffice PDF page per sheet - confirmed by
-    hand. A real-world spreadsheet with its own print layout can
-    fragment a single sheet across several pages instead (see
-    SofficeOnlyDocument's docstring for the 4-sheet-into-8-pages case
-    found on a real file); this fixture is deliberately too simple to
-    exercise that, since there's no reliable way to construct a
-    reproducible fragmentation case as a small checked-in fixture."""
+    """One soffice PDF page per sheet (see
+    _SOFFICE_SPREADSHEET_PDF_FILTER). This fixture is too simple to
+    fragment even without that option (a real-world spreadsheet with
+    its own print layout does - see SofficeOnlyDocument's docstring),
+    since there's no reliable way to construct a reproducible
+    fragmentation case as a small checked-in fixture."""
     handler = classify(sample_multisheet_ods, tmp_path)
     assert isinstance(handler, pdfless.SofficeOnlyDocument)
     pages = handler.build_pages(str(tmp_path))
@@ -517,7 +553,7 @@ def test_svg_renders_via_chrome_directly(sample_svg, tmp_path):
     assert len(pages) == 1
     assert handler._pdf_delegate is not None
 
-    cache = pdfless.PageCache(handler.path, str(tmp_path), handler)
+    cache = pdfless.PageCache(str(tmp_path), handler)
     small = handler.get_page_image(cache, 1, 300, "width")
     big = handler.get_page_image(cache, 1, 900, "width")
     assert small.width == 300
@@ -534,3 +570,16 @@ def test_svg_falls_back_to_plain_text_without_chrome(sample_svg, tmp_path, monke
     handler = classify(sample_svg, tmp_path)
     assert isinstance(handler, pdfless.TextDocument)
     assert not isinstance(handler, pdfless.SvgDocument)
+
+
+def test_find_chrome_never_picks_vivaldi_from_path(monkeypatch):
+    """Vivaldi's headless mode doesn't work, so it's excluded from
+    CHROME_CANDIDATES - and must not sneak back in via the PATH fallback
+    either, on a machine where it's the only Chromium-family browser."""
+    monkeypatch.setattr(pdfless, "CHROME_CANDIDATES", ())
+    monkeypatch.setattr(pdfless, "_default_browser_bundle_id", lambda: None)
+    monkeypatch.setattr(
+        pdfless.shutil, "which",
+        lambda name: "/usr/bin/" + name if name.startswith("vivaldi") else None,
+    )
+    assert pdfless.find_chrome() is None

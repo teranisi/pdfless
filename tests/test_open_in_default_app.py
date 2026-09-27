@@ -1,4 +1,4 @@
-"""pdfless._open_in_default_app(): the macOS-only half of "O"/"v" (see
+"""pdfless._open_in_default_app(): the macOS-only half of "v" (see
 run_viewer()) - hands a file off to macOS's own `open` command. Unit-
 tested directly here (monkeypatching sys.platform/subprocess.Popen) since
 the key-dispatch/follow-mode side effect lives in run_viewer()'s own

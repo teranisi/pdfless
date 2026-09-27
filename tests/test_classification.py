@@ -63,27 +63,32 @@ def test_rtf_office_document_always_renders_continuous(sample_rtf, tmp_path):
     """A converted RTF's page-height pagination doesn't correspond to
     anything in the original RTF (it's just whatever page size
     textutil's docx conversion happened to declare), so
-    RtfOfficeDocument.build_pages() always forces continuous=True,
-    ignoring whatever the caller (-c/--continuous) asked for."""
+    RtfOfficeDocument.build_pages() always renders it with
+    continuous=True internally."""
     handler = classify(sample_rtf, tmp_path)
     assert isinstance(handler, pdfless.RtfOfficeDocument)
 
-    for continuous_arg in (False, True):
-        pages = handler.build_pages(str(tmp_path), continuous=continuous_arg)
-        assert pages is not None
-        assert len(pages) == 1
+    pages = handler.build_pages(str(tmp_path))
+    assert pages is not None
+    assert len(pages) == 1
 
 
 def test_rtf_falls_back_to_plain_text_without_textutil(sample_rtf, tmp_path, monkeypatch):
-    """Without textutil (e.g. non-macOS), RtfOfficeDocument.sniff()
-    can't convert to .docx at all - HANDLER_CLASSES falls through to
-    the plain-text-only RtfDocument instead (see HANDLER_CLASSES'
-    ordering)."""
+    """Without soffice or textutil (e.g. a minimal non-macOS install),
+    RtfOfficeDocument.sniff() can't render the file at all - via
+    soffice directly, or by converting to .docx first - so
+    HANDLER_CLASSES falls through to the plain-text-only RtfDocument
+    instead (see HANDLER_CLASSES' ordering). find_soffice() checks
+    SOFFICE_CANDIDATES' fixed paths before ever calling shutil.which()
+    (see its own docstring), so that alone has to be patched too, not
+    just shutil.which("soffice") - otherwise a real local LibreOffice
+    install (found via one of those fixed paths) would still win."""
     real_which = pdfless.shutil.which
     monkeypatch.setattr(
         pdfless.shutil, "which",
         lambda name: None if name == "textutil" else real_which(name),
     )
+    monkeypatch.setattr(pdfless, "find_soffice", lambda: None)
     handler = classify(sample_rtf, tmp_path)
     assert isinstance(handler, pdfless.RtfDocument)
     assert not isinstance(handler, pdfless.RtfOfficeDocument)
@@ -100,6 +105,82 @@ def test_corrupt_pdf_raises_unusable_file_not_silently_skipped(tmp_path):
         raised = True
         assert "PDF" in str(e)
     assert raised, "a corrupt PDF should raise UnusableFile, not fall through silently"
+
+
+def test_encrypted_pdf_classifies_as_pdf_without_prompting(sample_encrypted_pdf, tmp_path):
+    """sniff() alone must never prompt for a password - only actually
+    reading the file (page_count(), the first such call - see
+    _ensure_unlocked()) does, so a password-protected PDF that's merely
+    being classified (not the one about to be shown) is left alone."""
+    handler = classify(sample_encrypted_pdf, tmp_path)
+    assert isinstance(handler, pdfless.PdfDocument)
+    assert handler.encrypted
+
+
+def test_encrypted_pdf_unlocks_with_correct_password(sample_encrypted_pdf, tmp_path, monkeypatch):
+    handler = classify(sample_encrypted_pdf, tmp_path)
+    monkeypatch.setattr(pdfless, "_prompt_pdf_password", lambda filename, message=None: "secret123")
+    assert handler.page_count() == 7
+    assert not handler.encrypted
+    assert handler.password == "secret123"
+
+
+def test_encrypted_pdf_retries_after_wrong_password(sample_encrypted_pdf, tmp_path, monkeypatch):
+    attempts = iter(["wrong", "still wrong", "secret123"])
+    monkeypatch.setattr(pdfless, "_prompt_pdf_password", lambda filename, message=None: next(attempts))
+    handler = classify(sample_encrypted_pdf, tmp_path)
+    assert handler.page_count() == 7
+    assert handler.password == "secret123"
+
+
+def test_encrypted_pdf_cancelled_prompt_raises_unusable_file(sample_encrypted_pdf, tmp_path, monkeypatch):
+    """Esc/^C/^D at the prompt (modeled here by _prompt_pdf_password
+    returning None, as both the cooked and raw-mode implementations do
+    on cancellation) is reported the same as any other unusable file -
+    go_to_file() and main()'s own candidate search already both know
+    how to handle that."""
+    monkeypatch.setattr(pdfless, "_prompt_pdf_password", lambda filename, message=None: None)
+    handler = classify(sample_encrypted_pdf, tmp_path)
+    try:
+        handler.page_count()
+        assert False, "cancelling the password prompt should raise UnusableFile"
+    except pdfless.UnusableFile as e:
+        assert "password" in str(e)
+
+
+def test_password_protected_docx_raises_unusable_file_not_silently_skipped(tmp_path):
+    """A password-protected .docx/.pptx/... is an OLE/CFB container
+    (MS-OFFCRYPTO) instead of the plain ZIP it normally is - detected
+    upfront (see is_password_protected_ooxml_or_visio()) so pdfless
+    skips it with a clear reason instead of committing to a soffice/
+    qlmanage render that's bound to fail uninformatively."""
+    bad = tmp_path / "protected.docx"
+    bad.write_bytes(pdfless._CFB_MAGIC + b"\x00" * 32)
+    raised = False
+    try:
+        classify(str(bad), tmp_path)
+    except pdfless.UnusableFile as e:
+        raised = True
+        assert "password" in str(e)
+    assert raised, "a password-protected .docx should raise UnusableFile, not fall through silently"
+
+
+def test_password_protected_vsdx_raises_unusable_file(tmp_path):
+    bad = tmp_path / "protected.vsdx"
+    bad.write_bytes(pdfless._CFB_MAGIC + b"\x00" * 32)
+    raised = False
+    try:
+        classify(str(bad), tmp_path)
+    except pdfless.UnusableFile as e:
+        raised = True
+        assert "password" in str(e)
+    assert raised
+
+
+def test_ordinary_docx_is_unaffected_by_the_cfb_check(sample_docx, tmp_path):
+    """A normal (unencrypted) .docx is a plain ZIP, not CFB - make sure
+    the new upfront check doesn't misclassify it."""
+    assert not pdfless.is_password_protected_ooxml_or_visio(sample_docx)
 
 
 def test_invalid_utf8_non_pdf_file_raises_unusable_file(tmp_path):
@@ -132,7 +213,7 @@ def test_capability_matrix_matches_expectations(
         True, True, True,
     )
     assert (image.supports_text_mode(), image.supports_search(), image.text_mode_is_paginated()) == (
-        False, False, False,
+        True, False, False,
     )
     assert (text.supports_text_mode(), text.supports_search(), text.text_mode_is_paginated()) == (
         True, True, False,

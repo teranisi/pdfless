@@ -96,10 +96,18 @@ def test_clean_text_mode_second_press_restores_decorations_and_image_mode(sample
     assert decorations(viewer) == (True, True, True, True)
 
 
+class _NoTextModeDocument(pdfless.ImageDocument):
+    """Stands in for a kind with no text mode at all - ImageDocument
+    itself has one now (format/EXIF info - see its extract_text())."""
+
+    def supports_text_mode(self):
+        return False
+
+
 def test_clean_text_mode_returns_false_without_touching_copy_mode(sample_image):
     """Same failure case as toggle_text_mode() - a kind with no text
     mode at all shouldn't have side effects on the decorations either."""
-    viewer = make_viewer(pdfless.ImageDocument(sample_image))
+    viewer = make_viewer(_NoTextModeDocument(sample_image))
     before = decorations(viewer)
 
     assert viewer.toggle_clean_text_mode() is False

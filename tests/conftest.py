@@ -18,6 +18,19 @@ sys.path.insert(0, REPO_ROOT)
 import pdfless  # noqa: E402  (import after sys.path tweak, deliberately)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_office_cache(tmp_path, monkeypatch):
+    """Every test gets its own throwaway LibreOffice-PDF cache directory
+    (see pdfless._office_cache_root()) instead of ever touching the
+    real persistent one on the machine running the suite - via an env
+    var rather than a plain monkeypatch of the function, since a
+    PtySession-driven test spawns a real, separate `pdfless.py`
+    subprocess (see PtySession) that only an inherited env var (not an
+    attribute patched on this process's own imported pdfless module)
+    can actually reach."""
+    monkeypatch.setenv("PDFLESS_OFFICE_CACHE_DIR", str(tmp_path / "office-cache"))
+
+
 # All of these are static files checked into tests/fixtures/ rather
 # than generated on the fly - faster (no per-run PIL/textutil work),
 # easy to inspect/open by hand, and (sample.docx in particular) works
@@ -30,6 +43,15 @@ def sample_pdf():
     screenshots/manual testing too) - avoids depending on any PDF-
     writing library just to get a valid multi-page-capable sample."""
     return os.path.join(REPO_ROOT, "lorem_ipsum.pdf")
+
+
+@pytest.fixture
+def sample_encrypted_pdf():
+    """Same content as sample_pdf (lorem_ipsum.pdf), password-protected
+    (user password "secret123") via `qpdf --encrypt secret123 secret123
+    256 -- lorem_ipsum.pdf sample_encrypted.pdf` - for exercising
+    PdfDocument's password-prompt handling (see _ensure_unlocked())."""
+    return os.path.join(FIXTURES_DIR, "sample_encrypted.pdf")
 
 
 @pytest.fixture
@@ -303,6 +325,15 @@ class PtySession:
                 os.dup2(stdin_r, 0)
                 os.close(stdin_r)
                 os.close(stdin_w)
+            # Every test here assumes real image-mode output (an
+            # OSC 1337 inline image), which iterm2_like() only turns on
+            # given the right env vars - present when the suite happens
+            # to run inside a real iTerm2 window, but not guaranteed
+            # anywhere else (CI, a plain xterm, ...). Forcing it here
+            # (only in this forked child, not the pytest process
+            # itself) keeps every test deterministic regardless of
+            # where the suite is actually run from.
+            os.environ["TERM_PROGRAM"] = "iTerm.app"
             os.execvp(sys.executable, [sys.executable, PDFLESS_PY, *args])
         else:
             fcntl.ioctl(

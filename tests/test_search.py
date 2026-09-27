@@ -123,12 +123,27 @@ def test_pdf_search_uses_bbox_index_in_both_modes(sample_pdf):
 
 
 def test_image_document_never_supports_search(sample_image):
+    """ImageDocument gained a text mode of its own (format/EXIF info -
+    see extract_text()), but never a search index - "/" while looking
+    at an image still has to fall through to entering text mode first,
+    the same as any other kind without its own image-mode search."""
     viewer = make_viewer(pdfless.ImageDocument(sample_image))
     assert viewer.doc_handler.supports_search() is False
-    assert viewer.doc_handler.supports_text_mode() is False
+    assert viewer.doc_handler.supports_text_mode() is True
+
+
+class _NoTextModeDocument(pdfless.ImageDocument):
+    """Stands in for a kind with no text mode at all - ImageDocument
+    itself no longer represents that case (see the test above)."""
+
+    def supports_text_mode(self):
+        return False
+
+
+def test_neither_text_mode_nor_search_blocks_the_slash_key(sample_image):
+    viewer = make_viewer(_NoTextModeDocument(sample_image))
     assert viewer.text_mode is False
-    # Mirrors the '/' key handler's gating condition directly, since an
-    # ImageDocument can never reach text_mode at all.
+    # Mirrors the '/' key handler's gating condition directly.
     assert not (viewer.text_mode or viewer.doc_handler.supports_search())
 
 def test_match_index_from_picks_the_nearest_one_in_each_direction():

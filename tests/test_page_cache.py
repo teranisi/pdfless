@@ -3,7 +3,7 @@ import pdfless
 
 def test_pdf_page_cache_returns_sized_image_and_hits_cache(sample_pdf, tmp_path):
     handler = pdfless.PdfDocument(sample_pdf)
-    cache = pdfless.PageCache(sample_pdf, str(tmp_path), handler)
+    cache = pdfless.PageCache(str(tmp_path), handler)
     img = cache.get(1, 400, fit="width")
     assert img.width == 400
 
@@ -13,7 +13,7 @@ def test_pdf_page_cache_returns_sized_image_and_hits_cache(sample_pdf, tmp_path)
 
 def test_image_page_cache_returns_correctly_sized_image(sample_image, tmp_path):
     handler = pdfless.ImageDocument(sample_image)
-    cache = pdfless.PageCache(sample_image, str(tmp_path), handler)
+    cache = pdfless.PageCache(str(tmp_path), handler)
     img = cache.get(1, 128, fit="width")
     # original is 64x48 (4:3) - scaled to 128 wide keeps that ratio
     assert img.width == 128
@@ -34,7 +34,7 @@ def test_office_page_cache_reads_from_handler_pages_live(tmp_path):
 
     handler = pdfless.OfficeDocument("/does/not/matter.pptx")
     handler.pages = [str(page1)]
-    cache = pdfless.PageCache("/does/not/matter.pptx", str(tmp_path), handler)
+    cache = pdfless.PageCache(str(tmp_path), handler)
     first = cache.get(1, 50, fit="width")
     assert first.getpixel((0, 0))[:3] == (255, 0, 0)
 
